@@ -37,6 +37,15 @@ class MQTT_Client:
 
 
 def main():
+    m = MQTT_Client()
+    quit = False
+    while not quit:
+        user_in = input("Message to send: ")
+
+        m.publish(user_in)
+
+
+def sequence():
     quit = False
     m = MQTT_Client()
     for i in range(20):
@@ -50,9 +59,7 @@ def main():
 
         if i == 15:
             m.publish("quit")
-        sleep(1)
-
-
+        sleep(3)
 
 
 if __name__ ==  "__main__":

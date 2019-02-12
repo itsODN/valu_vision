@@ -1,0 +1,8 @@
+threshold=148
+max_distance=0.2
+template_filepath=../templates/
+camera_number=2
+broker=iot.eclipse.org
+port=1883
+input_topic=iot/data/ssfcic/camera_tracking/commands
+output_topic=iot/data/ssfcic/camera_tracking/position
