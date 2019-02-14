@@ -10,6 +10,7 @@ def take_img(cam):
     ret, frame = cam.read()
     #cv2.imwrite("test.png", frame)
     cam.release()
+    cv2.imwrite("new_pic.png", frame)
     return frame
 
 def show_img(img):
@@ -90,4 +91,4 @@ def main():
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    main()
+    take_img(cam)

@@ -1,0 +1,6 @@
+threshold=200
+# Sets the maximal distance between HuMoments to be considered
+max_distance=0.2
+template_filepath=../templates/
+camera_number=2
+broker=iot.eclipse.org

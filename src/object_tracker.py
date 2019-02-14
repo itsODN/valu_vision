@@ -7,7 +7,6 @@ class App:
 
         self.setup()
         self.score_filter = SummaryScoreFilter()
-        self.filter       = ImageFilter(self.settings)
         self.cam          = cv2.VideoCapture(self.settings["camera_number"])
         self.mqtt         = MQTT_Client(self)
 
@@ -19,14 +18,16 @@ class App:
         self.increment = 1
         self.state     = "standby"
 
+        # Debugging Tools
+        self.show_stream = True
+
     #---------------------------------------------------------------------------
     #Program Control Flow
     #---------------------------------------------------------------------------
 
     def setup(self):
         self.settings = dict()
-        cast_int = ["threshold","camera_number","port"]
-        cast_float = ["max_distance"]
+        cast_int = ["camera_number","port"]
         with open("../settings.txt","r") as file:
             for line in file:
                 if line[0] == "#" or line[0] == "":
@@ -34,8 +35,6 @@ class App:
                 line = line.rstrip().split("=")
                 if line[0] in cast_int:
                     self.settings[line[0]] = int(line[1])
-                elif line[0] in cast_float:
-                    self.settings[line[0]] = float(line[1])
                 else:
                     self.settings[line[0]] = line[1]
         print(self.settings)
@@ -48,30 +47,28 @@ class App:
     def main_loop(self):
 
         while not self.quit:
+            _, img = self.cam.read()
             self.process_inbox()
             if self.overlay:
                 self.toggle_overlay()
                 self.overlay = None
-
-
-            _, img = self.cam.read()
-
-
 
             if self.state == "standby":
                 pass
 
             if self.state == "tracking":
 
-                img_filtered = self.filter.apply(img)
+                matches = self.filter.go(img)
+                for p,c,d in matches:
+                    #publish here
+                    pass
 
-                candidates = self.finder.find_candidates(img_filtered)
 
-                winner = self.score_filter.update(candidates)
+                if self.show_stream:
+                    img = self.draw_contour(matches, img)
+                    cv2.imshow("Tracked Objects", img)
+                    cv2.waitKey(5)
 
-                if winner:
-                    print("Publishing:",winner)
-                    self.mqtt.publish(winner)
 
 
     def shutdown(self):
@@ -83,7 +80,7 @@ class App:
 
     def toggle_overlay(self):
         if self.overlay == "filter_settings":
-            self.adjust_filter_settings()
+            self.filter.live_setting()
         if self.overlay == "finder_settings":
             self.adjust_finder_settings()
         return
@@ -108,16 +105,23 @@ class App:
         if self.payload:
             if self.payload[0] == "quit":
                 self.shutdown()
+
             elif self.payload[0] == "stop_tracking" and self.state == "tracking":
-                cv2.destroyAllWindows()
                 self.state = "standby"
                 print("Stoping Tracking. On standby...")
                 del self.finder
+
             elif self.payload[0] == "new_template" and self.state == "standby":
-                cv2.destroyAllWindows()
                 print("Received new Template. Changing to tracking mode")
                 self.new_template(self.payload[1])
+                self.overlay = "filter_settings"
+
+            elif self.payload[0] == "track":
+                print("Trying to open template",self.payload[1])
+                template = Template(template_path=self.settings["template_filepath"]+self.payload[1])
+                self.filter = TemplateTracker(self, template, process=True)
                 self.state = "tracking"
+
 
             if self.payload[0] == "overlay" and not self.overlay:
                 self.overlay = self.payload[1]
@@ -127,28 +131,28 @@ class App:
     #---------------------------------------------------------------------------
     # Image Processing
     #---------------------------------------------------------------------------
+    def draw_contour(self, matches, img):
+        if not matches:
+            return img
+        for p, c, d  in matches:
+            cv2.circle(img, p, 7, (0,0,255), -1)
+            cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            cv2.drawContours(img, c, -1, (0,255,0), 2)
+
+            return img
 
     def new_template(self, file_name):
         filepath = self.settings["template_filepath"] + file_name
-        img = cv2.imread(filepath, cv2.IMREAD_COLOR)
-        img = self.filter.apply(img)
-        self.finder = BinaryFinder(img, self.settings)
+        template = Template(img_path=filepath)
+        self.filter = TemplateTracker(self, template)
 
-
-    def draw_contour(self, tracked_objects, img):
-        for o in tracked_objects:
-            cv2.circle(img, o.position, 7, (0,0,255), -1)
-            cv2.putText(img, str(o.x)+"|"+str(o.y), (o.x -20, o.y -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
-            cv2.drawContours(img, o.contour, -1, (0,255,0), 2)
-
-        return img
 
     def adjust_filter_settings(self):
         print("Engaging filter settings mode")
 
-        window_name = "Filter Settings"
-        cv2.namedWindow(window_name)
-        cv2.createTrackbar("Threshold",window_name,0,255,self.nothing)
+        window = "Filter Settings"
+        cv2.namedWindow(window)
+        cv2.createTrackbar("Threshold",window,0,255,self.nothing)
 
         while True:
             self.process_inbox()
@@ -157,15 +161,15 @@ class App:
             if quit:
                 break
 
-            threshold = cv2.getTrackbarPos("Threshold",window_name)
+            threshold = cv2.getTrackbarPos("Threshold",window)
             self.settings["threshold"] = threshold
             self.filter.update_settings(self.settings)
 
             filtered_img = self.filter.apply(img)
 
 
-            cv2.imshow(window_name, filtered_img)
-        cv2.destroyWindow(window_name)
+            cv2.imshow(window, filtered_img)
+        cv2.destroyWindow(window)
         self.overlay = None
 
         return
@@ -179,7 +183,6 @@ class App:
         while True:
             self.process_inbox()
             _, img = self.cam.read()
-            quit = self.key_events()
             if quit:
                 break
 
@@ -188,7 +191,7 @@ class App:
             candidates = self.finder.find_candidates(filtered_img)
 
             img = self.draw_contour(candidates, img)
-            cv2.imshow(window_name,img)
+            cv2.imshow(window,img)
 
         cv2.destroyAllWindows()
         self.overlay = None
@@ -204,35 +207,6 @@ class App:
         if k%256 == 27:
             self.quit = True
             self.shutdown()
-
-    def key_events(self):
-        k = cv2.waitKey(5) % 0xFF
-
-        if k == ord("+"):
-            self.settings["threshold"] += self.increment
-            print("Threshold:",self.settings["threshold"])
-            self.filter.update_settings(self.settings)
-        elif k == ord("-"):
-            self.settings["threshold"] -= self.increment
-            print("Threshold:",self.settings["threshold"])
-            self.filter.update_settings(self.settings)
-
-        if k == ord("*"):
-            #global threshold
-            self.increment += 1
-            print("Increment:",self.increment)
-        elif k == ord("/"):
-            if self.increment == 1:
-                pass
-            else:
-                self.increment -= 1
-            print("Increment:",self.increment)
-
-        if k == ord("s"):
-            self.save_settings()
-
-        if k == ord("q"):
-            return True
 
 
 class MQTT_Client:
@@ -290,24 +264,219 @@ class TrackedObject:
     def publish(self):
         print("x:",self.x,"y:",self.y)
 
-class ImageFilter:
-    def __init__(self, settings, mode="binary"):
-        self.settings = settings
-        self.mode = mode
+class Template:
+    def __init__(self, img_path=None, template_path=None):
+        if img_path:
+            self.img = cv2.imread(img_path,cv2.IMREAD_COLOR)
+            self.config_file = img_path[:-4] + ".config"
+            self.config = {
+            "BinaryLower"      : 0,
+            "BinaryUpper"      : 255,
+            "HueLower"         : 0,
+            "HueUpper"         : 255,
+            "SaturationLower"  : 0,
+            "SaturationUpper"  : 255,
+            "ValueLower"       : 0,
+            "ValueUpper"       : 255,
+            "MaxDistance"      : 20, # Is divided by 20 befor application
+            }
+        if template_path:
+            self.config = dict()
+            self.config = self.read_config(template_path+".config")
+            self.img = cv2.imread(template_path+".png",cv2.IMREAD_COLOR)
+
+    def read_config(self, path):
+        with open(path,"r") as file:
+            for line in file:
+                if line[0] == "#" or line[0] == "":
+                    continue
+                line = line.rstrip().split("=")
+                print(line)
+                self.config[line[0]] = int(line[1])
+
+        return self.config
+
+    def get_hsv_lower(self):
+        return self.config["HueLower"], self.config["SaturationLower"], self.config["ValueLower"]
+
+    def get_hsv_upper(self):
+        return self.config["HueUpper"], self.config["SaturationUpper"], self.config["ValueUpper"]
+
+    def save_config(self):
+        with open(self.config_file,"w") as file:
+            for key in self.config:
+                file.write(key+"="+str(self.config[key])+"\n")
+
+
+
+class TemplateTracker:
+    def __init__(self, app, template, process=False):
+        self.app = app
+        self.settings = app.settings
+        self.template = template
+        self.window = "Filter"
+
+        if process:
+            self.template.contours = self.filter(self.template.img)
+
+
+    def filter(self, img):
+        color_mask, color_img = self.color(img)
+        filtered_img = self.binary(color_img)
+        contours = self.get_contour(filtered_img)
+
+        return contours
+
+    def go(self, img):
+        contours = self.filter(img)
+        matches = self.get_matches(contours, self.template.contours)
+
+        return matches
 
     def apply(self, img):
-        if self.mode == "binary":
-            img = self.binary(img)
-            return img
+        img = self.binary(img)
+        return img
 
     def update_settings(self, settings):
         self.settings = settings
 
     def binary(self, img):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _,img = cv2.threshold(img, self.settings["threshold"],255, cv2.THRESH_BINARY)
+        _,img = cv2.threshold(img, self.template.config["BinaryLower"],self.template.config["BinaryUpper"], cv2.THRESH_BINARY)
+        return img
+
+    def color(self, img):
+        mask = cv2.inRange(img, self.template.get_hsv_lower(), self.template.get_hsv_upper())
+        res = cv2.bitwise_and(img,img,mask=mask)
+        return mask, res
+
+    def get_contour(self, img):
+        contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        return contours
+
+    def get_matches(self, c_contours, t_contours):
+
+        matches = list()
+
+        for c in c_contours:
+            if t_contours:
+                distance = cv2.matchShapes(t_contours[0], c, cv2.CONTOURS_MATCH_I2,0)
+            else:
+                return
+            if distance < self.template.config["MaxDistance"]: #Schwellenwert
+                matches.append( (self.get_center(c), c, distance) )
+
+        return matches
+
+    def get_center(self, contour):
+        M = cv2.moments(contour)
+        try:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+        except ZeroDivisionError:
+            cX, cY = 0, 0
+
+        return cX, cY
+
+    def draw_contour(self, candidates, img):
+        if not candidates:
+            return img
+        for p, c, d  in candidates:
+            cv2.circle(img, p, 7, (0,0,255), -1)
+            cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            cv2.drawContours(img, c, -1, (0,255,0), 2)
 
         return img
+
+    def apply_config(self):
+        img = self.template.img
+        color_mask, color_img = self.color(img)
+        filtered_img = self.binary(color_img)
+
+        candidates = self.get_contour(filtered_img, t_filtered_img)
+        # TODO: get_contour separate, function für den ganzen filterstack
+
+    def track(self):
+        apply_config()
+
+
+    def live_setting(self):
+
+        cv2.namedWindow("Template")
+        cv2.namedWindow(self.window)
+        cv2.createTrackbar("View",self.window,1,3,nothing)
+        cv2.createTrackbar("Binary Lower",self.window,self.template.config["BinaryLower"],255,nothing)
+        cv2.createTrackbar("Binary Upper",self.window,self.template.config["BinaryUpper"],255,nothing)
+        cv2.createTrackbar("Hue Lower",self.window,self.template.config["HueLower"],255,nothing)
+        cv2.createTrackbar("Hue Upper",self.window,self.template.config["HueUpper"],255,nothing)
+        cv2.createTrackbar("Saturation Lower",self.window,self.template.config["SaturationLower"],255,nothing)
+        cv2.createTrackbar("Saturation Upper",self.window,self.template.config["SaturationUpper"],255,nothing)
+        cv2.createTrackbar("Value Lower", self.window,self.template.config["ValueLower"],255,nothing)
+        cv2.createTrackbar("Value Upper",self.window,self.template.config["ValueUpper"],255,nothing)
+        cv2.createTrackbar("Max Distance", self.window, self.template.config["MaxDistance"],100,nothing)
+
+        while True:
+            self.app.process_inbox()
+            _, img = self.app.cam.read()
+            quit = self.key_events()
+            if quit:
+                break
+
+            view = cv2.getTrackbarPos("View",self.window)
+            self.template.config["BinaryLower"] = cv2.getTrackbarPos("Binary Lower",self.window)
+            self.template.config["BinaryUpper"] = cv2.getTrackbarPos("Binary Upper",self.window)
+            self.template.config["HueLower"] = cv2.getTrackbarPos("Hue Lower",self.window)
+            self.template.config["HueUpper"] = cv2.getTrackbarPos("Hue Upper",self.window)
+            self.template.config["SaturationLower"] = cv2.getTrackbarPos("Saturation Lower",self.window)
+            self.template.config["SaturationUpper"] = cv2.getTrackbarPos("Saturation Upper",self.window)
+            self.template.config["ValueLower"] = cv2.getTrackbarPos("Value Lower",self.window)
+            self.template.config["ValueUpper"] = cv2.getTrackbarPos("Value Upper",self.window)
+            self.template.config["MaxDistance"] = cv2.getTrackbarPos("Max Distance",self.window)
+
+            color_mask, color_img = self.color(img)
+            t_color_mask, t_color_img = self.color(self.template.img)
+            filtered_img = self.binary(color_img)
+            t_filtered_img = self.binary(t_color_img)
+
+            contours = self.get_contour(filtered_img)
+            t_contours = self.get_contour(t_filtered_img)
+
+            matches = self.get_matches(contours, t_contours)
+
+            if view == 0:
+                cv2.imshow(self.window, color_mask)
+                cv2.imshow("Template", t_color_mask)
+            elif view == 1:
+                cv2.imshow(self.window, color_img)
+                cv2.imshow("Template", t_color_img)
+            elif view == 2:
+                cv2.imshow(self.window,filtered_img)
+                cv2.imshow("Template", t_filtered_img)
+            elif view == 3:
+                img = self.draw_contour(matches, img)
+                cv2.imshow(self.window,img)
+            cv2.waitKey(5)
+        cv2.destroyWindow(self.window)
+        cv2.destroyWindow("Template")
+        self.overlay = None
+
+        return
+
+
+    def key_events(self):
+        k = cv2.waitKey(5) % 0xFF
+
+        if k == ord("s"):
+            self.app.settings = self.settings
+            self.app.save_settings()
+
+        if k == ord("s"):
+            print("Saving Template")
+            self.template.save_config()
+
+        if k == ord("q"):
+            return True
 
 
 class SummaryScoreFilter:
@@ -380,12 +549,13 @@ class BinaryFinder:
 
         for c in contours:
             distance = cv2.matchShapes(self.template_contour[0], c, cv2.CONTOURS_MATCH_I2,0)
-            if distance < self.settings["max_distance"]: #Schwellenwert
+            if distance < self.settings["max_distance"]/100: #Schwellenwert
                 candidates.append(TrackedObject(c, distance))
 
         return candidates
 
-
+def nothing(x):
+    pass
 
 
 if __name__ == "__main__":

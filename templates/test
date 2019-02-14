@@ -1,0 +1,11 @@
+Image=../templates/test.png
+ConfigFile=../templates/test
+BinaryLower=209
+BinaryUpper=255
+HueLower=209
+HueUpper=255
+SaturationLower=216
+SaturationUpper=255
+ValueLower=208
+ValueUpper=255
+MaxDistance=1
