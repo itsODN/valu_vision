@@ -1,6 +1,7 @@
 import cv2
 import paho.mqtt.client
 from operator import itemgetter
+import numpy as np
 
 class App:
     def __init__(self):
@@ -270,8 +271,9 @@ class Template:
             self.img = cv2.imread(img_path,cv2.IMREAD_COLOR)
             self.config_file = img_path[:-4] + ".config"
             self.config = {
-            "BinaryLower"      : 0,
+            "BinaryLower"      : 100,
             "BinaryUpper"      : 255,
+            "Blur"             : 0,
             "HueLower"         : 0,
             "HueUpper"         : 255,
             "SaturationLower"  : 0,
@@ -279,7 +281,11 @@ class Template:
             "ValueLower"       : 0,
             "ValueUpper"       : 255,
             "MaxDistance"      : 20, # Is divided by 20 befor application
+            "AreaFilter"       : 500,
+            "PerimeterFilter"  : 500,
+            "BinaryMethod"     : 1,
             }
+
         if template_path:
             self.config = dict()
             self.config = self.read_config(template_path+".config")
@@ -314,7 +320,9 @@ class TemplateTracker:
         self.app = app
         self.settings = app.settings
         self.template = template
-        self.window = "Filter"
+        self.window = "Settings"
+
+        self.match_method = []
 
         if process:
             self.template.contours = self.filter(self.template.img)
@@ -340,10 +348,28 @@ class TemplateTracker:
     def update_settings(self, settings):
         self.settings = settings
 
-    def binary(self, img):
+    def binary_band_inv(self, img):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _,img = cv2.threshold(img, self.template.config["BinaryLower"],self.template.config["BinaryUpper"], cv2.THRESH_BINARY)
+        _,img = cv2.threshold(img, self.template.config["BinaryUpper"],255, cv2.THRESH_TOZERO_INV)
+        _,img = cv2.threshold(img, self.template.config["BinaryLower"],255, cv2.THRESH_BINARY_INV)
         return img
+
+    def binary_band(self,img):
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _,img = cv2.threshold(img, self.template.config["BinaryUpper"],255, cv2.THRESH_TOZERO_INV)
+        _,img = cv2.threshold(img, self.template.config["BinaryLower"],255, cv2.THRESH_BINARY)
+        return img
+
+    def blur(self,img):
+        blur_mode = self.template.config["Blur"]
+        if blur_mode == 0:
+            return img
+        if blur_mode == 1:
+            return cv2.GaussianBlur(img, (5,5), 0)
+        if blur_mode == 2:
+            return cv2.medianBlur(img,5)
+        if blur_mode == 3:
+            return cv2.bilateralFilter(img,9,75,75)
 
     def color(self, img):
         mask = cv2.inRange(img, self.template.get_hsv_lower(), self.template.get_hsv_upper())
@@ -355,17 +381,43 @@ class TemplateTracker:
 
         return contours
 
+    def area_filter(self, matches):
+        if not matches:
+            return
+        if self.template.config["AreaFilter"] == 0:
+            return matches
+
+        f_matches = list()
+        for p, c, d, a, l in matches:
+            if self.template.area + self.template.config["AreaFilter"] > a > self.template.area - self.template.config["AreaFilter"]:
+                f_matches.append([p, c, d, a, l])
+
+        return f_matches
+
+    def perimeter_filter(self, matches):
+        if not matches:
+            return
+        if self.template.config["PerimeterFilter"] == 0:
+            return matches
+
+        f_matches = list()
+        for p, c, d, a, l in matches:
+            if self.template.perimeter + self.template.config["PerimeterFilter"] > l > self.template.perimeter - self.template.config["PerimeterFilter"]:
+                f_matches.append( [p,c,d,a,l] )
+
+        return f_matches
+
     def get_matches(self, c_contours, t_contours):
 
         matches = list()
 
         for c in c_contours:
             if t_contours:
-                distance = cv2.matchShapes(t_contours[0], c, cv2.CONTOURS_MATCH_I2,0)
+                distance = cv2.matchShapes(t_contours[0], c, cv2.CONTOURS_MATCH_I1,0)
             else:
                 return
             if distance < self.template.config["MaxDistance"]: #Schwellenwert
-                matches.append( (self.get_center(c), c, distance) )
+                matches.append( (self.get_center(c), c, distance, cv2.contourArea(c), cv2.arcLength(c, True)) )
 
         return matches
 
@@ -382,9 +434,10 @@ class TemplateTracker:
     def draw_contour(self, candidates, img):
         if not candidates:
             return img
-        for p, c, d  in candidates:
+        for p, c, d, a, l  in candidates:
             cv2.circle(img, p, 7, (0,0,255), -1)
-            cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            cv2.putText(img, str(a)+"|"+str(l), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            #cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
             cv2.drawContours(img, c, -1, (0,255,0), 2)
 
         return img
@@ -403,9 +456,13 @@ class TemplateTracker:
 
     def live_setting(self):
 
+        mock_img = np.zeros( (1,500,3), np.uint8)
+
         cv2.namedWindow("Template")
         cv2.namedWindow(self.window)
-        cv2.createTrackbar("View",self.window,1,3,nothing)
+        cv2.createTrackbar("View",self.window,4,4,nothing)
+        cv2.createTrackbar("Blur",self.window,self.template.config["Blur"],3,nothing)
+        cv2.createTrackbar("Binary Method", self.window, self.template.config["BinaryMethod"],2,nothing)
         cv2.createTrackbar("Binary Lower",self.window,self.template.config["BinaryLower"],255,nothing)
         cv2.createTrackbar("Binary Upper",self.window,self.template.config["BinaryUpper"],255,nothing)
         cv2.createTrackbar("Hue Lower",self.window,self.template.config["HueLower"],255,nothing)
@@ -415,6 +472,9 @@ class TemplateTracker:
         cv2.createTrackbar("Value Lower", self.window,self.template.config["ValueLower"],255,nothing)
         cv2.createTrackbar("Value Upper",self.window,self.template.config["ValueUpper"],255,nothing)
         cv2.createTrackbar("Max Distance", self.window, self.template.config["MaxDistance"],100,nothing)
+        cv2.createTrackbar("Area", self.window, self.template.config["AreaFilter"],2000,nothing)
+        cv2.createTrackbar("Perimeter", self.window, self.template.config["PerimeterFilter"],2000,nothing)
+
 
         while True:
             self.app.process_inbox()
@@ -424,6 +484,8 @@ class TemplateTracker:
                 break
 
             view = cv2.getTrackbarPos("View",self.window)
+            self.template.config["Blur"] = cv2.getTrackbarPos("Blur",self.window)
+            self.template.config["BinaryMethod"] = cv2.getTrackbarPos("Binary Method",self.window)
             self.template.config["BinaryLower"] = cv2.getTrackbarPos("Binary Lower",self.window)
             self.template.config["BinaryUpper"] = cv2.getTrackbarPos("Binary Upper",self.window)
             self.template.config["HueLower"] = cv2.getTrackbarPos("Hue Lower",self.window)
@@ -433,32 +495,79 @@ class TemplateTracker:
             self.template.config["ValueLower"] = cv2.getTrackbarPos("Value Lower",self.window)
             self.template.config["ValueUpper"] = cv2.getTrackbarPos("Value Upper",self.window)
             self.template.config["MaxDistance"] = cv2.getTrackbarPos("Max Distance",self.window)
+            self.template.config["AreaFilter"] = cv2.getTrackbarPos("Area", self.window)
+            self.template.config["PerimeterFilter"] = cv2.getTrackbarPos("Perimeter", self.window)
 
-            color_mask, color_img = self.color(img)
-            t_color_mask, t_color_img = self.color(self.template.img)
-            filtered_img = self.binary(color_img)
-            t_filtered_img = self.binary(t_color_img)
+            blur_img = self.blur(img)
+            t_blur_img = self.blur(self.template.img)
+
+
+            color_mask, color_img = self.color(blur_img)
+            t_color_mask, t_color_img = self.color(t_blur_img)
+
+            if self.template.config["BinaryMethod"] == 0:
+                filtered_img = self.binary_band(color_img)
+                t_filtered_img = self.binary_band(t_color_img)
+            elif self.template.config["BinaryMethod"] == 1:
+                filtered_img = self.binary_band_inv(color_img)
+                t_filtered_img = self.binary_band_inv(t_color_img)
+            elif self.template.config["BinaryMethod"] == 2:
+                filtered_img = cv2.Canny(color_img, self.template.config["BinaryLower"],self.template.config["BinaryUpper"])
+                t_filtered_img = cv2.Canny(t_color_img, self.template.config["BinaryLower"],self.template.config["BinaryUpper"])
 
             contours = self.get_contour(filtered_img)
             t_contours = self.get_contour(t_filtered_img)
 
+
             matches = self.get_matches(contours, t_contours)
+            if t_contours:
+                self.template.area = cv2.contourArea(t_contours[0])
+                self.template.perimeter = cv2.arcLength(t_contours[0], True)
+
+            f_matches = self.area_filter(matches)
+            f_matches = self.perimeter_filter(f_matches)
 
             if view == 0:
-                cv2.imshow(self.window, color_mask)
+                cv2.imshow(self.window, mock_img)
                 cv2.imshow("Template", t_color_mask)
+                cv2.imshow("Camera Stream", color_mask)
             elif view == 1:
-                cv2.imshow(self.window, color_img)
+                cv2.imshow(self.window, mock_img)
                 cv2.imshow("Template", t_color_img)
+                cv2.imshow("Camera Stream", color_img)
             elif view == 2:
-                cv2.imshow(self.window,filtered_img)
+                cv2.imshow(self.window, mock_img)
                 cv2.imshow("Template", t_filtered_img)
+                cv2.imshow("Camera Stream", filtered_img)
             elif view == 3:
                 img = self.draw_contour(matches, img)
-                cv2.imshow(self.window,img)
+                cv2.imshow(self.window, mock_img)
+                cv2.imshow("Camera Stream",img)
+
+                t_img = self.template.img.copy()
+                if t_contours:
+                    p = self.get_center(t_contours[0])
+                    cv2.circle(t_img, p, 7, (0,0,255), -1)
+                    cv2.putText(t_img, str(cv2.contourArea(t_contours[0]))+"|"+str(cv2.arcLength(t_contours[0],True)), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                    #cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                    cv2.drawContours(t_img, t_contours[0], -1, (0,255,0), 2)
+                cv2.imshow("Template", t_img)
+            elif view == 4:
+                img = self.draw_contour(f_matches, img)
+                cv2.imshow(self.window, mock_img)
+                cv2.imshow("Camera Stream",img)
+
+                t_img = self.template.img.copy()
+                if t_contours:
+                    p = self.get_center(t_contours[0])
+                    cv2.circle(t_img, p, 7, (0,0,255), -1)
+                    cv2.putText(t_img, str(cv2.contourArea(t_contours[0]))+"|"+str(cv2.arcLength(t_contours[0],True)), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                    #cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                    cv2.drawContours(t_img, t_contours[0], -1, (0,255,0), 2)
+                    cv2.imshow("Template", t_img)
+
             cv2.waitKey(5)
-        cv2.destroyWindow(self.window)
-        cv2.destroyWindow("Template")
+        cv2.destroyAllWindows()
         self.overlay = None
 
         return
