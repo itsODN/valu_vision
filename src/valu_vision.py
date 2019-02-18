@@ -2,6 +2,7 @@ import cv2
 import paho.mqtt.client
 from operator import itemgetter
 import numpy as np
+import os
 
 class App:
     def __init__(self):
@@ -102,10 +103,13 @@ class App:
             self.payload = None
 
     def new_template(self, img_path):
+        img_path = self.settings["template_filepath"] + img_path
+        if not os.path.isfile(img_path):
+            print("File",img_path,"does not exist. Aborting...")
+            return
         print("Setting up new template with image:",img_path)
-        #TODO check if file exists
         tem = Template()
-        tem.new(self.settings["template_filepath"]+img_path)
+        tem.new(img_path)
         if self.tracker:
             del self.tracker
         self.tracker = TemplateTracker(self,tem)
@@ -113,9 +117,13 @@ class App:
         self.state = "setup"
 
     def load_template(self, tem_name):
+        tem_name = self.settings["template_filepath"]+tem_name
+        if not os.path.isfile(tem_name+".config"):
+            print(tem_name+".config does not exist. Aborting...")
+            return
         print("Loading template",tem_name)
         tem = Template()
-        tem.load(self.settings["template_filepath"]+tem_name)
+        tem.load(tem_name)
         if self.tracker:
             del self.tracker
         self.tracker = TemplateTracker(self, tem)
@@ -184,6 +192,8 @@ class Template:
         "AreaFilter"       : 500,
         "PerimeterFilter"  : 500,
         "BinaryMethod"     : 1,
+        "RETR"             : 1,
+        "Color Inverted"   : 1,
         }
 
     def load(self, name):
@@ -220,12 +230,13 @@ class TemplateTracker:
     def __init__(self, app, template):
         self.app = app
         self.settings = app.settings
+        self.inverted = True
         self.cam = cv2.VideoCapture(self.settings["camera_number"])
         self.template = template
         self.window = "Settings"
         self.view = 4
         self.mock_img = np.zeros( (1,500,3), np.uint8)
-
+        self.retr = [cv2.RETR_LIST, cv2.RETR_EXTERNAL, cv2.RETR_CCOMP, cv2.RETR_TREE]
         self.match_method = []
 
     def __del__(self):
@@ -290,7 +301,7 @@ class TemplateTracker:
         return img
 
     def blur(self,img):
-        blur_mode = self.template.config["Blur"]
+        blur_mode = self.template.config["Blur"] #int object is not subscriptable
         if blur_mode == 0:
             return img
         if blur_mode == 1:
@@ -302,6 +313,8 @@ class TemplateTracker:
 
     def color(self, img):
         mask = cv2.inRange(img, self.template.get_hsv_lower(), self.template.get_hsv_upper())
+        if self.template.config["Color Inverted"]:
+            mask = cv2.bitwise_not(mask)
         res = cv2.bitwise_and(img,img,mask=mask)
         return mask, res
 
@@ -336,7 +349,7 @@ class TemplateTracker:
     # Matching Tools
     #---------------------------------------------------------------------------
     def get_contour(self, img):
-        contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(img, self.retr[self.template.config["RETR"]], cv2.CHAIN_APPROX_SIMPLE)
 
         return contours
 
@@ -385,8 +398,8 @@ class TemplateTracker:
             return img
         for p, c, d, a, l  in candidates:
             cv2.circle(img, p, 7, (0,0,255), -1)
-            cv2.putText(img, str(a)+"|"+str(l), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
-            #cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            #cv2.putText(img, str(a)+"|"+str(l), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            cv2.putText(img, str(p[0])+"|"+str(p[1]), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
             cv2.drawContours(img, c, -1, (0,255,0), 2)
 
         return img
@@ -405,6 +418,7 @@ class TemplateTracker:
         cv2.createTrackbar("Saturation Upper",self.window,self.template.config["SaturationUpper"],255,nothing)
         cv2.createTrackbar("Value Lower", self.window,self.template.config["ValueLower"],255,nothing)
         cv2.createTrackbar("Value Upper",self.window,self.template.config["ValueUpper"],255,nothing)
+        cv2.createTrackbar("RETR Method",self.window,self.template.config["RETR"],3,nothing)
         cv2.createTrackbar("Max Distance", self.window, self.template.config["MaxDistance"],100,nothing)
         cv2.createTrackbar("Area", self.window, self.template.config["AreaFilter"],2000,nothing)
         cv2.createTrackbar("Perimeter", self.window, self.template.config["PerimeterFilter"],2000,nothing)
@@ -421,6 +435,7 @@ class TemplateTracker:
         self.template.config["SaturationUpper"] = cv2.getTrackbarPos("Saturation Upper",self.window)
         self.template.config["ValueLower"] = cv2.getTrackbarPos("Value Lower",self.window)
         self.template.config["ValueUpper"] = cv2.getTrackbarPos("Value Upper",self.window)
+        self.template.config["RETR"] = cv2.getTrackbarPos("RETR Method",self.window)
         self.template.config["MaxDistance"] = cv2.getTrackbarPos("Max Distance",self.window)
         self.template.config["AreaFilter"] = cv2.getTrackbarPos("Area", self.window)
         self.template.config["PerimeterFilter"] = cv2.getTrackbarPos("Perimeter", self.window)
@@ -466,6 +481,7 @@ class TemplateTracker:
 
             t_img = self.template.img.copy()
             if self.t_contours:
+                print(self.t_contours)
                 p = self.get_center(self.t_contours[0])
                 cv2.circle(t_img, p, 7, (0,0,255), -1)
                 cv2.putText(t_img, str(cv2.contourArea(self.t_contours[0]))+"|"+str(cv2.arcLength(self.t_contours[0],True)), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
@@ -488,6 +504,9 @@ class TemplateTracker:
             print("Saving Parameters to config file")
             self.template.save_config()
 
+        if k == ord("i"):
+            self.change_inverted()
+
 
     def end_setup(self):
         print("leaving setup")
@@ -498,6 +517,15 @@ class TemplateTracker:
         print("aborting setup")
         cv2.destroyAllWindows()
         self.app.state = "standby"
+
+    def change_inverted(self):
+        print("inverting colormask")
+        if self.template.config["Color Inverted"]:
+            self.template.config["Color Inverted"] = 0
+        else:
+            self.template.config["Color Inverted"] = 1
+
+
 
 
 
