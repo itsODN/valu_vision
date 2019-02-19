@@ -52,7 +52,6 @@ class App:
 
             if self.state == "setup":
                 self.tracker.update()
-                self.tracker.update_trackbars()
                 self.tracker.render()
 
             if self.state == "tracking":
@@ -99,21 +98,22 @@ class App:
             elif self.payload[0] == "load":
                 self.load_template(self.payload[1])
 
+            elif self.payload[0] == "set":
+                self.change_config(self.payload[1])
 
             self.payload = None
 
     def new_template(self, img_path):
         img_path = self.settings["template_filepath"] + img_path
-        if not os.path.isfile(img_path):
-            print("File",img_path,"does not exist. Aborting...")
+        if not os.path.isfile(img_path+".png"):
+            print("File",img_path+".png","does not exist. Aborting...")
             return
-        print("Setting up new template with image:",img_path)
+        print("Setting up new template with image:",img_path+".png")
         tem = Template()
         tem.new(img_path)
         if self.tracker:
             del self.tracker
         self.tracker = TemplateTracker(self,tem)
-        self.tracker.live_init()
         self.state = "setup"
 
     def load_template(self, tem_name):
@@ -128,6 +128,20 @@ class App:
             del self.tracker
         self.tracker = TemplateTracker(self, tem)
         self.state = "tracking"
+
+    def change_config(self,msg):
+        k,v = msg.split("=")
+        v = int(v)
+        if not self.tracker:
+            print("No Template to change settings...")
+            return
+
+        if k == "View":
+            self.tracker.view = v
+            return
+        else:
+            self.tracker.template.change_setting(k,v)
+
 
     def exit_key(self):
         k = cv2.waitKey(5) % 0xFF
@@ -175,9 +189,10 @@ class Template:
         pass
 
     def new(self, name):
-        self.name = name
-        self.config_file = name[:-4]+".config"
-        self.img = cv2.imread(name,cv2.IMREAD_COLOR)
+        self.name = name + ".png"
+        print("Opening file:", self.name)
+        self.config_file = name+".config"
+        self.img = cv2.imread(name+".png",cv2.IMREAD_COLOR)
         self.config = {
         "BinaryLower"      : 100,
         "BinaryUpper"      : 255,
@@ -188,19 +203,20 @@ class Template:
         "SaturationUpper"  : 255,
         "ValueLower"       : 0,
         "ValueUpper"       : 255,
-        "MaxDistance"      : 20, # Is divided by 20 befor application
+        "MaxDistance"      : 2, # Is divided by 20 befor application
         "AreaFilter"       : 500,
         "PerimeterFilter"  : 500,
         "BinaryMethod"     : 1,
         "RETR"             : 1,
-        "Color Inverted"   : 1,
+        "Color Inverted"   : 0,
         }
 
     def load(self, name):
-        self.name = name
+        self.name = name + ".png"
         self.config = dict()
+        print("Opening file:",self.name)
         self.config = self.read_config(self.name+".config")
-        self.img = cv2.imread(self.name+".png",cv2.IMREAD_COLOR)
+        self.img = cv2.imread(self.name,cv2.IMREAD_COLOR)
 
     def read_config(self, path):
         with open(path,"r") as file:
@@ -224,6 +240,82 @@ class Template:
             for key in self.config:
                 file.write(key+"="+str(self.config[key])+"\n")
 
+    def change_setting(self,key,value):
+        try:
+            print("New Value:",key,value)
+            self.config[key] = value
+            print(self.config)
+        except:
+            print("Something went wrong",key,value)
+
+class Match:
+    def __init__(self, index, hir, cnt):
+        self.index      = index
+        self.glob_hir   = hir
+        self.hir        = hir[index]
+        self.glob_cnt   = cnt
+        self.cnt        = cnt[index]
+        self.children   = list()
+        self.parent     = None
+        self.process_hierarchy()
+
+    def __repr__(self):
+        s = "[Match|i"+str(self.index)+"children"+str(len(self.children))
+        return s
+
+    def process_hierarchy(self):
+        next_cnt, prev_cnt, child, parent = self.hir
+        if child >= 0:
+            self.has_child = True
+            self.children = self.child_indices(child)
+        else:
+            self.has_child = False
+
+        if parent >= 0:
+            self.has_parent = True
+        else:
+            self.has_parent = False
+
+        if next_cnt >= 0:
+            self.has_brother = True
+        else:
+            self.has_brother = False
+
+
+    def find_children(self):
+        next_cnt, prev_cnt, child, parent = self.hir
+        m = Match(child,self.glob_hir,self.glob_cnt)
+        self.children.append(m)
+        if m.has_brother:
+            pass
+
+    def child_indices(self,i):
+        children = list()
+        while True:
+            if self.glob_hir[i][0] < 0:
+                break
+            m = Match(i,self.glob_hir,self.glob_cnt)
+            children.append(m)
+            i = self.glob_hir[i][0]
+        print(children)
+        return children
+
+    def find_brother(self,i,brothers=[]):
+        m = Match(i,self.glob_hir,self.glob_cnt)
+        brothers.append(m)
+        next_cnt, prev_cnt, child, parent = m.hir
+        if next_cnt < 0:
+            print(m)
+            return brothers
+        else:
+            brothers = self.find_brother(next_cnt,brothers)
+
+
+    def new_child(self,match):
+        self.children.append(match)
+
+    def new_parent(self, match):
+        self.parent     = match
 
 
 class TemplateTracker:
@@ -266,6 +358,7 @@ class TemplateTracker:
 
         self.contours = self.get_contour(self.filtered_img)
         self.t_contours = self.get_contour(self.t_filtered_img)
+        #self.get_cnt_tree(self.filtered_img)
 
 
         self.matches = self.get_matches(self.contours, self.t_contours)
@@ -353,6 +446,25 @@ class TemplateTracker:
 
         return contours
 
+    def get_cnt_tree(self,img):
+        contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        hierarchy = hierarchy[0]
+        parents = list()
+        matches = dict()
+        for i in range( len(contours) ):
+            next_cnt, prev_cnt, child, parent = hierarchy[i]
+            if parent < 0:
+                m = Match(i, hierarchy, contours)
+                parents.append(m)
+
+
+
+        for p in parents:
+            if p.has_child:
+                print(p)
+
+        print("-"*30)
+
     def get_matches(self, c_contours, t_contours):
 
         matches = list()
@@ -390,9 +502,6 @@ class TemplateTracker:
     #---------------------------------------------------------------------------
     # GUI Tools
     #---------------------------------------------------------------------------
-    def live_init(self):
-        self.setup_trackbars()
-
     def draw_contour(self, candidates, img):
         if not candidates:
             return img
@@ -404,42 +513,6 @@ class TemplateTracker:
 
         return img
 
-    def setup_trackbars(self):
-        cv2.namedWindow("Template")
-        cv2.namedWindow(self.window)
-        cv2.createTrackbar("View",self.window,4,4,nothing)
-        cv2.createTrackbar("Blur",self.window,self.template.config["Blur"],3,nothing)
-        cv2.createTrackbar("Binary Method", self.window, self.template.config["BinaryMethod"],2,nothing)
-        cv2.createTrackbar("Binary Lower",self.window,self.template.config["BinaryLower"],255,nothing)
-        cv2.createTrackbar("Binary Upper",self.window,self.template.config["BinaryUpper"],255,nothing)
-        cv2.createTrackbar("Hue Lower",self.window,self.template.config["HueLower"],255,nothing)
-        cv2.createTrackbar("Hue Upper",self.window,self.template.config["HueUpper"],255,nothing)
-        cv2.createTrackbar("Saturation Lower",self.window,self.template.config["SaturationLower"],255,nothing)
-        cv2.createTrackbar("Saturation Upper",self.window,self.template.config["SaturationUpper"],255,nothing)
-        cv2.createTrackbar("Value Lower", self.window,self.template.config["ValueLower"],255,nothing)
-        cv2.createTrackbar("Value Upper",self.window,self.template.config["ValueUpper"],255,nothing)
-        cv2.createTrackbar("RETR Method",self.window,self.template.config["RETR"],3,nothing)
-        cv2.createTrackbar("Max Distance", self.window, self.template.config["MaxDistance"],100,nothing)
-        cv2.createTrackbar("Area", self.window, self.template.config["AreaFilter"],2000,nothing)
-        cv2.createTrackbar("Perimeter", self.window, self.template.config["PerimeterFilter"],2000,nothing)
-
-    def update_trackbars(self):
-        self.view = cv2.getTrackbarPos("View",self.window)
-        self.template.config["Blur"] = cv2.getTrackbarPos("Blur",self.window)
-        self.template.config["BinaryMethod"] = cv2.getTrackbarPos("Binary Method",self.window)
-        self.template.config["BinaryLower"] = cv2.getTrackbarPos("Binary Lower",self.window)
-        self.template.config["BinaryUpper"] = cv2.getTrackbarPos("Binary Upper",self.window)
-        self.template.config["HueLower"] = cv2.getTrackbarPos("Hue Lower",self.window)
-        self.template.config["HueUpper"] = cv2.getTrackbarPos("Hue Upper",self.window)
-        self.template.config["SaturationLower"] = cv2.getTrackbarPos("Saturation Lower",self.window)
-        self.template.config["SaturationUpper"] = cv2.getTrackbarPos("Saturation Upper",self.window)
-        self.template.config["ValueLower"] = cv2.getTrackbarPos("Value Lower",self.window)
-        self.template.config["ValueUpper"] = cv2.getTrackbarPos("Value Upper",self.window)
-        self.template.config["RETR"] = cv2.getTrackbarPos("RETR Method",self.window)
-        self.template.config["MaxDistance"] = cv2.getTrackbarPos("Max Distance",self.window)
-        self.template.config["AreaFilter"] = cv2.getTrackbarPos("Area", self.window)
-        self.template.config["PerimeterFilter"] = cv2.getTrackbarPos("Perimeter", self.window)
-
     def show(self):
         img = self.img.copy()
         img = self.draw_contour(self.f_matches, img)
@@ -450,20 +523,16 @@ class TemplateTracker:
     def render(self):
         img = self.img.copy()
         if self.view == 0:
-            cv2.imshow(self.window, self.mock_img)
             cv2.imshow("Template", self.t_color_mask)
             cv2.imshow("Camera Stream", self.color_mask)
         elif self.view == 1:
-            cv2.imshow(self.window, self.mock_img)
             cv2.imshow("Template", self.t_color_img)
             cv2.imshow("Camera Stream", self.color_img)
         elif self.view == 2:
-            cv2.imshow(self.window, self.mock_img)
             cv2.imshow("Template", self.t_filtered_img)
             cv2.imshow("Camera Stream", self.filtered_img)
         elif self.view == 3:
             img = self.draw_contour(self.matches, img)
-            cv2.imshow(self.window, self.mock_img)
             cv2.imshow("Camera Stream",img)
 
             t_img = self.template.img.copy()
@@ -476,12 +545,10 @@ class TemplateTracker:
             cv2.imshow("Template", t_img)
         elif self.view == 4:
             img = self.draw_contour(self.f_matches, img)
-            cv2.imshow(self.window, self.mock_img)
             cv2.imshow("Camera Stream",img)
 
             t_img = self.template.img.copy()
             if self.t_contours:
-                print(self.t_contours)
                 p = self.get_center(self.t_contours[0])
                 cv2.circle(t_img, p, 7, (0,0,255), -1)
                 cv2.putText(t_img, str(cv2.contourArea(self.t_contours[0]))+"|"+str(cv2.arcLength(self.t_contours[0],True)), (p[0] -20, p[1] -20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
@@ -504,9 +571,6 @@ class TemplateTracker:
             print("Saving Parameters to config file")
             self.template.save_config()
 
-        if k == ord("i"):
-            self.change_inverted()
-
 
     def end_setup(self):
         print("leaving setup")
@@ -518,12 +582,6 @@ class TemplateTracker:
         cv2.destroyAllWindows()
         self.app.state = "standby"
 
-    def change_inverted(self):
-        print("inverting colormask")
-        if self.template.config["Color Inverted"]:
-            self.template.config["Color Inverted"] = 0
-        else:
-            self.template.config["Color Inverted"] = 1
 
 
 

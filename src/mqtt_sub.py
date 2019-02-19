@@ -6,7 +6,7 @@ class MQTT_Client:
     def __init__(self):
         self.client = paho.mqtt.client.Client()
 
-        self.input_topic  = "iot/data/ssfcic/camera_tracking/position"
+        self.input_topic  = "iot/data/ssfcic/camera_tracking/commands"
         self.output_topic = "iot/data/ssfcic/camera_tracking/commands"
 
         self.client.on_message    = self.on_message
